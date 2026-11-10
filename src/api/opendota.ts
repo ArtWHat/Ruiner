@@ -106,7 +106,7 @@ async function fetchRetry(
       const res = await fetch(url, init)
       // OpenDota иногда отвечает 429/5xx — повторяем
       if ((res.status === 429 || res.status >= 500) && i < retries - 1) {
-        await sleep(600 * (i + 1), init?.signal)
+        await sleep(600 * (i + 1), init?.signal ?? undefined)
         continue
       }
       return res
@@ -114,7 +114,7 @@ async function fetchRetry(
       last = err
       if (init?.signal?.aborted) throw err
       if (i >= retries - 1) throw err
-      await sleep(500 * (i + 1), init?.signal)
+      await sleep(500 * (i + 1), init?.signal ?? undefined)
     }
   }
   throw last instanceof Error ? last : new Error('Failed to fetch')
