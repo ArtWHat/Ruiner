@@ -57,6 +57,8 @@ export interface OpenDotaMatch {
   match_id: number
   duration: number
   radiant_win: boolean
+  game_mode?: number
+  lobby_type?: number
   teamfights?: Teamfight[]
   radiant_gold_adv?: number[]
   radiant_xp_adv?: number[]
@@ -134,6 +136,10 @@ export interface MatchAnalysis {
   matchId: number
   duration: number
   radiantWin: boolean
+  gameMode?: number
+  lobbyType?: number
+  matchType: string
+  turbo: boolean
   players: PlayerAnalysis[]
   ruiner: PlayerAnalysis
   mvp: PlayerAnalysis

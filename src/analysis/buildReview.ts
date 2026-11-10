@@ -144,7 +144,9 @@ export function reviewBuild(
   enemies: MatchPlayer[],
   itemTimeline: Array<{ key: string; minute: number; label: string }>,
   durationMin: number,
+  turbo = false,
 ): BuildReview {
+  const timeScale = turbo ? 0.52 : 1
   const bought = new Set(itemTimeline.map((i) => i.key))
   // also raw purchase keys
   for (const p of self.purchase_log ?? []) {
@@ -152,7 +154,29 @@ export function reviewBuild(
   }
 
   const items: BuildItemRow[] = itemTimeline.map((i) => {
-    const t = timingFor(i.key, i.minute)
+    const ideal = IDEAL[i.key]
+    const scaledIdeal =
+      ideal === undefined ? undefined : Math.max(1, Math.round(ideal * timeScale))
+    const t =
+      scaledIdeal === undefined
+        ? timingFor(i.key, i.minute)
+        : (() => {
+            const diff = i.minute - scaledIdeal
+            if (diff <= 1)
+              return {
+                timingTone: 'good' as Tone,
+                timingNote: `рано/в срок (цель ~${scaledIdeal}м${turbo ? ', turbo' : ''})`,
+              }
+            if (diff <= 3)
+              return {
+                timingTone: 'mid' as Tone,
+                timingNote: `чуть позже (цель ~${scaledIdeal}м)`,
+              }
+            return {
+              timingTone: 'bad' as Tone,
+              timingNote: `поздно на ${diff}м (цель ~${scaledIdeal}м)`,
+            }
+          })()
     return {
       key: i.key,
       label: i.label,
@@ -305,7 +329,7 @@ export function reviewBuild(
     (owned(bought, MAGIC_ITEMS) && !owned(bought, PHYS_CORE))
   const physBuild = owned(bought, PHYS_CORE) && !magicHero
 
-  if (durationMin >= 35) {
+  if (durationMin >= (turbo ? 18 : 35)) {
     if (magicBuild || (magicHero && !physBuild)) {
       const magicLate = [
         'sheepstick',
@@ -347,27 +371,39 @@ export function reviewBuild(
   }
 
   const late = items.filter((i) => i.timingTone === 'bad')
-  for (const l of late.slice(0, 2)) {
+  // тайминг только в оценке, без дубля в списке минусов
+  for (const l of late.slice(0, 1)) {
     points.push({
       tone: 'bad',
-      text: `${l.label} слишком поздно (${l.minute}м, ${l.timingNote})`,
+      text: `${l.label} поздновато (${l.minute}м)`,
       itemKey: l.key,
     })
   }
 
-  // score
-  let score = 5
-  score += points.filter((p) => p.tone === 'good').length * 0.9
-  score -= points.filter((p) => p.tone === 'bad').length * 1.1
-  score -= late.length * 0.4
-  score = Math.max(1, Math.min(10, Math.round(score * 10) / 10))
-  // display as int 1-10
+  const goodN = points.filter((p) => p.tone === 'good').length
+  const badN = points.filter((p) => p.tone === 'bad').length
+  const onTime = items.filter((i) => i.timingTone === 'good').length
+  const major = items.length
+
+  // Стартуем с 7: нормальный осмысленный билд — уже «хорошо», 10 достижим.
+  let score = 7
+  score += goodN * 0.85
+  score -= badN * 0.75
+  score += Math.min(1.5, onTime * 0.35)
+  score += Math.min(1, major * 0.12)
+  if (goodN >= 4 && badN === 0) score = Math.max(score, 10)
+  else if (goodN >= 3 && badN <= 1) score = Math.max(score, 9)
+  else if (goodN >= 2 && badN === 0) score = Math.max(score, 8)
+  if (badN >= 4 && goodN <= 1) score = Math.min(score, 3)
+  else if (badN >= 3 && goodN === 0) score = Math.min(score, 2)
+
   const scoreInt = Math.max(1, Math.min(10, Math.round(score)))
 
   let summary = 'Сборный билд без явного фокуса'
-  if (scoreInt >= 8) summary = 'Хороший билд, базовые нужды закрыты'
+  if (scoreInt >= 10) summary = 'Отличный билд под матч'
+  else if (scoreInt >= 8) summary = 'Хороший билд, нужды закрыты'
   else if (scoreInt >= 6) summary = 'Нормальный билд, есть спорные решения'
-  else if (scoreInt >= 4) summary = 'Слабый билд под этот матч — много дыр'
+  else if (scoreInt >= 4) summary = 'Слабый билд под этот матч'
   else summary = 'Билд плохо подходит под врагов и тайминги'
 
   // unique points, cap

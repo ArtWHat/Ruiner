@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { goldTips, xpTips } from './analysis/curveTips'
 import { analyzeMatch } from './analysis/score'
-import { fetchMatch, formatMatchError } from './api/opendota'
+import {
+  fetchHeroes,
+  fetchMatch,
+  formatMatchError,
+  getHero,
+  heroImageUrl,
+  peekHistoryRuiner,
+} from './api/opendota'
 import { BuildPanel } from './components/BuildPanel'
 import { CompareChart } from './components/CompareChart'
 import { CurveAdvice } from './components/CurveAdvice'
@@ -14,26 +21,76 @@ import { RankIcon } from './components/RankIcon'
 import { RankPicker } from './components/RankPicker'
 import { TeamList } from './components/TeamList'
 import { RANK_CURVE_MULT, scaleSeries } from './data/ranks'
-import { applyShareMeta, copyShareLink, parseMatchQuery } from './share'
+import { applyShareMeta, matchShareUrl, parseMatchQuery } from './share'
 import type { MatchAnalysis, PlayerAnalysis } from './types'
 
 type ChartTab = 'gold' | 'xp' | 'build' | 'impact'
 
+type HistoryEntry = {
+  matchId: number
+  heroId?: number
+  heroName: string
+  heroImage: string
+  displayName: string
+}
+
 const HISTORY_KEY = 'ruiner-match-history'
 
-function loadHistory(): number[] {
+function loadHistory(): HistoryEntry[] {
   try {
     const raw = localStorage.getItem(HISTORY_KEY)
     if (!raw) return []
-    const parsed = JSON.parse(raw) as number[]
-    return Array.isArray(parsed) ? parsed.filter((n) => Number.isFinite(n)) : []
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((x): HistoryEntry | null => {
+        if (typeof x === 'number' && Number.isFinite(x) && x > 0) {
+          return {
+            matchId: x,
+            heroName: '—',
+            heroImage: '',
+            displayName: 'Матч',
+          }
+        }
+        if (
+          x &&
+          typeof x === 'object' &&
+          Number.isFinite((x as HistoryEntry).matchId)
+        ) {
+          const e = x as HistoryEntry
+          return {
+            matchId: e.matchId,
+            heroId: e.heroId,
+            heroName: e.heroName || '—',
+            heroImage: e.heroImage || '',
+            displayName: e.displayName || 'Anonymous',
+          }
+        }
+        return null
+      })
+      .filter((x): x is HistoryEntry => !!x)
   } catch {
     return []
   }
 }
 
-function saveHistory(ids: number[]) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(ids.slice(0, 8)))
+function saveHistory(entries: HistoryEntry[]) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 8)))
+}
+
+function needsHistoryArt(e: HistoryEntry): boolean {
+  return !e.heroImage || e.heroName === '—' || !e.heroId
+}
+
+function fillFromHeroId(e: HistoryEntry): HistoryEntry {
+  if (!e.heroId) return e
+  const hero = getHero(e.heroId)
+  if (!hero) return e
+  return {
+    ...e,
+    heroName: e.heroName === '—' ? hero.localized_name : e.heroName,
+    heroImage: e.heroImage || heroImageUrl(hero),
+  }
 }
 
 export default function App() {
@@ -45,30 +102,76 @@ export default function App() {
   const [selected, setSelected] = useState<PlayerAnalysis | null>(null)
   const [tab, setTab] = useState<ChartTab>('gold')
   const [rankMedal, setRankMedal] = useState<number | null>(null)
-  const [history, setHistory] = useState<number[]>([])
+  const [history, setHistory] = useState<HistoryEntry[]>([])
   const [modal, setModal] = useState<'moments' | 'draft' | null>(null)
-  const [shareHint, setShareHint] = useState('')
-  const bootRef = useRef(false)
+  const [shareFlash, setShareFlash] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
+  const bootedRef = useRef(false)
 
   useEffect(() => {
-    setHistory(loadHistory())
+    const ac = new AbortController()
+    const base = loadHistory()
+    setHistory(base)
+
+    ;(async () => {
+      try {
+        await fetchHeroes(ac.signal)
+      } catch {
+        return
+      }
+      if (ac.signal.aborted) return
+
+      let current = base.map(fillFromHeroId)
+      if (current.some((e, i) => e.heroImage !== base[i]?.heroImage)) {
+        setHistory([...current])
+        saveHistory(current)
+      }
+
+      for (let i = 0; i < current.length; i++) {
+        if (ac.signal.aborted) return
+        if (!needsHistoryArt(current[i])) continue
+        try {
+          const peeked = await peekHistoryRuiner(current[i].matchId, ac.signal)
+          if (!peeked || ac.signal.aborted) continue
+          current = current.map((e, idx) =>
+            idx === i
+              ? {
+                  matchId: peeked.matchId,
+                  heroId: peeked.heroId,
+                  heroName: peeked.heroName,
+                  heroImage: peeked.heroImage,
+                  displayName: peeked.displayName,
+                }
+              : e,
+          )
+          setHistory([...current])
+          saveHistory(current)
+        } catch {
+          // следующий матч
+        }
+      }
+    })()
+
+    // не abort на unmount: Strict Mode иначе рвёт подгрузку иконок
+    return () => undefined
   }, [])
 
+  // Автозапуск по ?m=… (без abort на unmount — иначе Strict Mode рвёт запрос)
   useEffect(() => {
-    if (bootRef.current) return
-    bootRef.current = true
+    if (bootedRef.current) return
+    bootedRef.current = true
     const id = parseMatchQuery()
-    if (id) void runAnalysis(id)
+    if (id) {
+      queueMicrotask(() => {
+        void runAnalysis(id)
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
     if (analysis) applyShareMeta(analysis)
   }, [analysis])
-
-  const durationMin = useMemo(
-    () => (analysis ? Math.floor(analysis.duration / 60) : 0),
-    [analysis],
-  )
 
   const rankGold = useMemo(() => {
     if (!selected || !rankMedal) return null
@@ -92,6 +195,9 @@ export default function App() {
   }
 
   function goHome() {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setLoading(false)
     setAnalysis(null)
     setSelected(null)
     setMatchId('')
@@ -100,19 +206,31 @@ export default function App() {
     setRankMedal(null)
     setTab('gold')
     setModal(null)
-    setShareHint('')
+    setShareFlash(false)
     document.title = 'Ruiner — анализ матча Dota 2'
     const url = new URL(window.location.href)
     url.search = ''
     window.history.replaceState({}, '', url.pathname)
   }
 
+  function cancelAnalysis() {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setLoading(false)
+    setError(false)
+    setStatus('Поиск остановлен')
+  }
+
   async function runAnalysis(id: number) {
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
+
     setMatchId(String(id))
     setLoading(true)
     setError(false)
-    setStatus('Загружаю информацию…')
-    setShareHint('')
+    setStatus('')
+    setShareFlash(false)
     setAnalysis(null)
     setSelected(null)
     setRankMedal(null)
@@ -120,42 +238,50 @@ export default function App() {
     url.searchParams.set('m', String(id))
     window.history.replaceState({}, '', `${url.pathname}?m=${id}`)
     try {
-      const { match, players } = await fetchMatch(id)
+      const { match, players } = await fetchMatch(id, ac.signal)
+      if (ac.signal.aborted) return
       const result = analyzeMatch(match, players)
       setAnalysis(result)
       setSelected(result.ruiner)
       setTab('gold')
-      setStatus(
-        `Матч ${result.matchId} · ${durationLabel(result.duration)} · победа ${
-          result.radiantWin ? 'Света' : 'Тьмы'
-        }`,
-      )
-      const next = [id, ...loadHistory().filter((x) => x !== id)]
+      setStatus('')
+      const entry: HistoryEntry = {
+        matchId: id,
+        heroId: result.ruiner.player.hero_id,
+        heroName: result.ruiner.heroName,
+        heroImage: result.ruiner.heroImage,
+        displayName: result.ruiner.displayName,
+      }
+      const next = [entry, ...loadHistory().filter((x) => x.matchId !== id)]
       saveHistory(next)
       setHistory(next)
     } catch (err) {
+      if (ac.signal.aborted) return
       setError(true)
       setStatus(formatMatchError(err))
     } finally {
+      if (abortRef.current === ac) abortRef.current = null
       setLoading(false)
     }
   }
 
   async function onShare() {
     if (!analysis) return
-    const res = await copyShareLink(analysis)
-    setShareHint(
-      res === 'shared'
-        ? 'Отправлено'
-        : res === 'copied'
-          ? 'Ссылка скопирована'
-          : 'Не удалось поделиться',
-    )
-    window.setTimeout(() => setShareHint(''), 2500)
+    try {
+      await navigator.clipboard.writeText(matchShareUrl(analysis.matchId))
+      setShareFlash(true)
+      window.setTimeout(() => setShareFlash(false), 900)
+    } catch {
+      setShareFlash(false)
+    }
   }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
+    if (loading) {
+      cancelAnalysis()
+      return
+    }
     const id = Number(matchId.trim())
     if (!Number.isFinite(id) || id <= 0) {
       setError(true)
@@ -179,53 +305,84 @@ export default function App() {
           onChange={(e) => setMatchId(e.target.value)}
           placeholder="Введи Match ID"
           inputMode="numeric"
-          required
+          required={!loading}
+          disabled={loading}
         />
-        <button type="submit" disabled={loading}>
-          {loading ? '…' : 'АНАЛИЗИРОВАТЬ'}
+        <button
+          type="submit"
+          className={loading ? 'search-busy' : ''}
+          title={loading ? 'Остановить поиск' : 'Анализировать'}
+        >
+          {loading ? <span className="spin" aria-label="Загрузка" /> : 'АНАЛИЗИРОВАТЬ'}
         </button>
       </form>
 
-      {!analysis && history.length > 0 && (
+      {!analysis && !loading && history.length > 0 && (
         <div className="history">
           <div className="history-label">История поиска</div>
           <div className="history-row">
-            {history.map((id) => (
+            {history.map((h) => (
               <button
-                key={id}
+                key={h.matchId}
                 type="button"
-                className="history-chip"
-                disabled={loading}
-                onClick={() => runAnalysis(id)}
+                className="history-card"
+                onClick={() => runAnalysis(h.matchId)}
               >
-                {id}
+                <div className="history-id">{h.matchId}</div>
+                <div className="history-ruiner">
+                  {h.heroImage ? (
+                    <img
+                      key={h.heroImage}
+                      src={h.heroImage}
+                      alt={h.heroName}
+                      loading="eager"
+                      decoding="async"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <span className="history-ph" />
+                  )}
+                  <div className="history-ruiner-meta">
+                    <span className="history-badge">Руинер</span>
+                    <span className="history-hero">{h.heroName}</span>
+                    <span className="history-player">{h.displayName}</span>
+                  </div>
+                </div>
               </button>
             ))}
           </div>
         </div>
       )}
 
-      {loading && (
-        <div className="loading-block">
-          <div className="loading-label">Загружаю информацию…</div>
-          <div className="loading-bar">
-            <i />
-          </div>
-        </div>
+      {error && status && (
+        <div className="status error">{status}</div>
       )}
-      {!loading && status && (
-        <div className={`status${error ? ' error' : ''}`}>{status}</div>
+      {!error && status && !analysis && (
+        <div className="status">{status}</div>
       )}
       {analysis && !loading && !error && (
-        <div className="share-row">
-          <button type="button" className="share-btn" onClick={() => void onShare()}>
-            <span className="share-ico" aria-hidden>
-              ↗
+        <>
+          <div className="match-pills" aria-label="Информация о матче">
+            <span className="match-pill">Матч {analysis.matchId}</span>
+            <span className="match-pill">{durationLabel(analysis.duration)}</span>
+            <span className="match-pill">
+              Победа {analysis.radiantWin ? 'Света' : 'Тьмы'}
             </span>
-            Поделиться
-          </button>
-          {shareHint && <span className="share-hint">{shareHint}</span>}
-        </div>
+            <span className="match-pill type">{analysis.matchType}</span>
+          </div>
+          <div className="share-row">
+            <button
+              type="button"
+              className={`share-btn${shareFlash ? ' flash' : ''}`}
+              onClick={() => void onShare()}
+            >
+              <span className="share-ico" aria-hidden>
+                ↗
+              </span>
+              Поделиться
+            </button>
+          </div>
+        </>
       )}
 
       {analysis && selected && (
@@ -305,10 +462,6 @@ export default function App() {
                   <span> / ожид. {selected.expectedXpm}</span>
                 </div>
                 <div>
-                  <span>Длительность </span>
-                  <strong>{durationMin} мин</strong>
-                </div>
-                <div>
                   <span>Импакт </span>
                   <strong
                     className={
@@ -321,9 +474,6 @@ export default function App() {
                   >
                     {selected.impactPct}%
                   </strong>
-                </div>
-                <div className="kpi-rank">
-                  <RankIcon rankTier={selected.player.rank_tier} size={24} />
                 </div>
               </div>
 
