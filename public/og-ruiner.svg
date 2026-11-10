@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#140f14"/>
+      <stop offset="100%" stop-color="#1c1022"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <text x="72" y="120" fill="#ff5c5c" font-family="Segoe UI, Arial, sans-serif" font-size="56" font-weight="700">RUINER</text>
+  <text x="72" y="250" fill="#f2f4f8" font-family="Segoe UI, Arial, sans-serif" font-size="72" font-weight="700">B> 70@C8=8; 83@C</text>
+  <text x="72" y="340" fill="#c5cbe0" font-family="Segoe UI, Arial, sans-serif" font-size="36"> 071>@ <0BG0 Dota 2 · @C8=5@, MVP, 4@0:8</text>
+  <rect x="72" y="420" width="280" height="64" rx="12" fill="#3a1520" stroke="#ff5c5c" stroke-width="2"/>
+  <text x="100" y="462" fill="#ffb4b4" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">B:@KBL @071>@</text>
+</svg>
