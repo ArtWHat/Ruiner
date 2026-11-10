@@ -1,9 +1,15 @@
 import type { MatchAnalysis } from './types'
 
+/** Постоянный адрес на GitHub Pages — не зависит от Cursor / localhost. */
+export const PUBLIC_SITE = 'https://artwhat.github.io/Ruiner/'
+
 export function matchShareUrl(matchId: number): string {
-  const url = new URL(window.location.href)
-  url.search = ''
-  url.hash = ''
+  const base =
+    typeof window !== 'undefined' &&
+    /github\.io$/i.test(window.location.hostname)
+      ? `${window.location.origin}${window.location.pathname.replace(/\/?$/, '/')}`
+      : PUBLIC_SITE
+  const url = new URL(base)
   url.searchParams.set('m', String(matchId))
   return url.toString()
 }

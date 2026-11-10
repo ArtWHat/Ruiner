@@ -3,7 +3,7 @@ import type { HeroMeta, MatchPlayer, OpenDotaMatch } from '../types'
 
 const API = 'https://api.opendota.com/api'
 const CDN = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes'
-const FETCH_MS = 12000
+const FETCH_MS = 25000
 
 let heroesCache: HeroMeta[] | null = null
 let heroesById: Map<number, HeroMeta> | null = null
@@ -11,13 +11,50 @@ let heroesInflight: Promise<HeroMeta[]> | null = null
 let itemsById: Map<number, string> | null = null
 let itemsInflight: Promise<Map<number, string>> | null = null
 
-function mergeSignal(signal?: AbortSignal, ms = FETCH_MS): AbortSignal {
-  const timeout = AbortSignal.timeout(ms)
-  if (!signal) return timeout
-  if (typeof AbortSignal.any === 'function') {
-    return AbortSignal.any([signal, timeout])
+class FetchTimeoutError extends Error {
+  constructor(message = 'OpenDota не ответила вовремя. Попробуй ещё раз.') {
+    super(message)
+    this.name = 'TimeoutError'
   }
-  return signal.aborted ? signal : timeout
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && err.name === 'AbortError')
+  )
+}
+
+/** Таймаут ≠ отмена пользователя: reason остаётся TimeoutError. */
+function mergeSignal(signal?: AbortSignal, ms = FETCH_MS): {
+  signal: AbortSignal
+  cleanup: () => void
+} {
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => {
+    ctrl.abort(new FetchTimeoutError())
+  }, ms)
+
+  const onUserAbort = () => {
+    ctrl.abort(
+      signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('Aborted', 'AbortError'),
+    )
+  }
+
+  if (signal) {
+    if (signal.aborted) onUserAbort()
+    else signal.addEventListener('abort', onUserAbort, { once: true })
+  }
+
+  return {
+    signal: ctrl.signal,
+    cleanup: () => {
+      window.clearTimeout(timer)
+      signal?.removeEventListener('abort', onUserAbort)
+    },
+  }
 }
 
 export async function fetchHeroes(signal?: AbortSignal): Promise<HeroMeta[]> {
@@ -148,6 +185,14 @@ function toPlayers(
 
 export { itemIconUrl } from '../data/items'
 
+function unwrapAbortReason(err: unknown): unknown {
+  if (!isAbortError(err)) return err
+  if (typeof err === 'object' && err && 'cause' in err && (err as { cause?: unknown }).cause) {
+    return (err as { cause: unknown }).cause
+  }
+  return err
+}
+
 async function fetchRetry(
   url: string,
   init?: RequestInit,
@@ -155,27 +200,40 @@ async function fetchRetry(
 ): Promise<Response> {
   let last: unknown
   for (let i = 0; i < retries; i++) {
-    const signal = mergeSignal(init?.signal ?? undefined)
     if (init?.signal?.aborted) {
       throw new DOMException('Aborted', 'AbortError')
     }
+    const merged = mergeSignal(init?.signal ?? undefined)
     try {
-      const res = await fetch(url, { ...init, signal })
+      const res = await fetch(url, { ...init, signal: merged.signal })
       if ((res.status === 429 || res.status >= 500) && i < retries - 1) {
-        await sleep(600 * (i + 1), init?.signal ?? undefined)
+        await sleep(700 * (i + 1), init?.signal ?? undefined)
         continue
       }
       return res
     } catch (err) {
-      last = err
-      if (init?.signal?.aborted) throw err
-      const timedOut =
-        err instanceof DOMException && err.name === 'TimeoutError'
-      if (timedOut && i >= retries - 1) {
-        throw new Error('OpenDota не ответила вовремя. Попробуй ещё раз.')
+      const reason =
+        merged.signal.reason instanceof Error
+          ? merged.signal.reason
+          : unwrapAbortReason(err)
+      last = reason
+      if (init?.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError')
       }
-      if (i >= retries - 1) throw err
+      const timedOut =
+        reason instanceof FetchTimeoutError ||
+        (reason instanceof Error && reason.name === 'TimeoutError')
+      if (timedOut) {
+        if (i >= retries - 1) {
+          throw new FetchTimeoutError()
+        }
+        await sleep(600 * (i + 1), init?.signal ?? undefined)
+        continue
+      }
+      if (i >= retries - 1) throw reason instanceof Error ? reason : err
       await sleep(500 * (i + 1), init?.signal ?? undefined)
+    } finally {
+      merged.cleanup()
     }
   }
   throw last instanceof Error ? last : new Error('Failed to fetch')
@@ -270,24 +328,22 @@ export async function fetchMatch(
 }
 
 export function formatMatchError(err: unknown): string {
-  if (err instanceof DOMException && err.name === 'AbortError') {
+  const reason = unwrapAbortReason(err)
+  if (
+    reason instanceof FetchTimeoutError ||
+    (reason instanceof Error && reason.name === 'TimeoutError') ||
+    (reason instanceof Error && /timeout/i.test(reason.message))
+  ) {
+    return 'OpenDota не ответила вовремя. Попробуй ещё раз.'
+  }
+  if (isAbortError(reason) || isAbortError(err)) {
     return 'Поиск остановлен'
   }
-  if (err instanceof Error) {
-    if (
-      err.name === 'AbortError' ||
-      err.name === 'TimeoutError' ||
-      /aborted|timeout/i.test(err.message)
-    ) {
-      if (/timeout/i.test(err.name + err.message)) {
-        return 'OpenDota не ответила вовремя. Попробуй ещё раз.'
-      }
-      return 'Поиск остановлен'
-    }
-    if (/failed to fetch|networkerror|load failed|network request failed/i.test(err.message)) {
+  if (reason instanceof Error) {
+    if (/failed to fetch|networkerror|load failed|network request failed/i.test(reason.message)) {
       return 'Нет ответа от OpenDota. Обнови страницу и попробуй ещё раз.'
     }
-    return err.message
+    return reason.message
   }
   return 'Неизвестная ошибка загрузки матча'
 }

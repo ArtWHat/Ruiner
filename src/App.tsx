@@ -107,6 +107,8 @@ export default function App() {
   const [shareFlash, setShareFlash] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const bootedRef = useRef(false)
+  /** Пока идёт анализ — не дёргаем OpenDota ради иконок истории. */
+  const analyzingRef = useRef(false)
 
   useEffect(() => {
     const base = loadHistory()
@@ -115,7 +117,11 @@ export default function App() {
     ;(async () => {
       // Сначала даём приоритет анализу матча из ?m=, историю — после паузы
       if (parseMatchQuery()) {
-        await new Promise((r) => window.setTimeout(r, 2500))
+        await new Promise((r) => window.setTimeout(r, 3500))
+      }
+      // Ждём конца анализа, чтобы не забить OpenDota параллельными peek
+      for (let n = 0; n < 40 && analyzingRef.current; n++) {
+        await new Promise((r) => window.setTimeout(r, 400))
       }
       try {
         await fetchHeroes()
@@ -130,6 +136,10 @@ export default function App() {
       }
 
       for (let i = 0; i < current.length; i++) {
+        if (analyzingRef.current) {
+          await new Promise((r) => window.setTimeout(r, 500))
+          if (analyzingRef.current) continue
+        }
         if (!needsHistoryArt(current[i])) continue
         try {
           const peeked = await peekHistoryRuiner(current[i].matchId)
@@ -147,7 +157,7 @@ export default function App() {
           )
           setHistory([...current])
           saveHistory(current)
-          await new Promise((r) => window.setTimeout(r, 350))
+          await new Promise((r) => window.setTimeout(r, 450))
         } catch {
           // следующий матч
         }
@@ -213,8 +223,10 @@ export default function App() {
   }
 
   function cancelAnalysis() {
-    abortRef.current?.abort()
+    const ac = abortRef.current
     abortRef.current = null
+    analyzingRef.current = false
+    ac?.abort()
     setLoading(false)
     setError(false)
     setStatus('Поиск остановлен')
@@ -224,6 +236,7 @@ export default function App() {
     abortRef.current?.abort()
     const ac = new AbortController()
     abortRef.current = ac
+    analyzingRef.current = true
 
     setMatchId(String(id))
     setLoading(true)
@@ -238,7 +251,7 @@ export default function App() {
     window.history.replaceState({}, '', `${url.pathname}?m=${id}`)
     try {
       const { match, players } = await fetchMatch(id, ac.signal)
-      if (ac.signal.aborted) return
+      if (ac.signal.aborted || abortRef.current !== ac) return
       const result = analyzeMatch(match, players)
       setAnalysis(result)
       setSelected(result.ruiner)
@@ -255,12 +268,15 @@ export default function App() {
       saveHistory(next)
       setHistory(next)
     } catch (err) {
-      if (ac.signal.aborted) return
+      if (ac.signal.aborted || abortRef.current !== ac) return
       setError(true)
       setStatus(formatMatchError(err))
     } finally {
-      if (abortRef.current === ac) abortRef.current = null
-      setLoading(false)
+      if (abortRef.current === ac) {
+        abortRef.current = null
+        analyzingRef.current = false
+        setLoading(false)
+      }
     }
   }
 

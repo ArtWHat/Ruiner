@@ -2,7 +2,11 @@
 
 Разбор матча Dota 2 по Match ID (OpenDota): руинер, MVP, графики золота/опыта, билд и вклад.
 
-**Сайт:** https://artwhat.github.io/Ruiner/
+**Публичный сайт (работает без Cursor):** https://artwhat.github.io/Ruiner/
+
+Он задеплоен на GitHub Pages. Закрытие Cursor / остановка `npm run dev` на него не влияет.
+
+Локальная разработка (гаснет вместе с терминалом Cursor):
 
 ```bash
 npm install
