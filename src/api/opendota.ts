@@ -3,10 +3,22 @@ import type { HeroMeta, MatchPlayer, OpenDotaMatch } from '../types'
 
 const API = 'https://api.opendota.com/api'
 const CDN = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes'
+const FETCH_MS = 12000
 
 let heroesCache: HeroMeta[] | null = null
 let heroesById: Map<number, HeroMeta> | null = null
 let heroesInflight: Promise<HeroMeta[]> | null = null
+let itemsById: Map<number, string> | null = null
+let itemsInflight: Promise<Map<number, string>> | null = null
+
+function mergeSignal(signal?: AbortSignal, ms = FETCH_MS): AbortSignal {
+  const timeout = AbortSignal.timeout(ms)
+  if (!signal) return timeout
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([signal, timeout])
+  }
+  return signal.aborted ? signal : timeout
+}
 
 export async function fetchHeroes(signal?: AbortSignal): Promise<HeroMeta[]> {
   if (heroesCache) return heroesCache
@@ -24,6 +36,28 @@ export async function fetchHeroes(signal?: AbortSignal): Promise<HeroMeta[]> {
   const list = await heroesInflight
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
   return list
+}
+
+async function fetchItemIndex(signal?: AbortSignal): Promise<Map<number, string>> {
+  if (itemsById) return itemsById
+  if (!itemsInflight) {
+    itemsInflight = (async () => {
+      const res = await fetchRetry(`${API}/constants/items`)
+      if (!res.ok) return new Map()
+      const data = (await res.json()) as Record<string, { id?: number }>
+      const map = new Map<number, string>()
+      for (const [key, val] of Object.entries(data)) {
+        if (val?.id != null) map.set(val.id, key)
+      }
+      itemsById = map
+      return map
+    })().finally(() => {
+      itemsInflight = null
+    })
+  }
+  const map = await itemsInflight
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  return map
 }
 
 export function getHero(id: number): HeroMeta | undefined {
@@ -52,7 +86,25 @@ function synthesizeSeries(
   return out
 }
 
-function toPlayers(raw: OpenDotaMatch): MatchPlayer[] {
+function slotIds(p: OpenDotaMatch['players'][number]): number[] {
+  return [
+    p.item_0,
+    p.item_1,
+    p.item_2,
+    p.item_3,
+    p.item_4,
+    p.item_5,
+    p.backpack_0,
+    p.backpack_1,
+    p.backpack_2,
+    p.item_neutral,
+  ].filter((x): x is number => typeof x === 'number' && x > 0)
+}
+
+function toPlayers(
+  raw: OpenDotaMatch,
+  itemIndex: Map<number, string>,
+): MatchPlayer[] {
   const minutes = Math.max(1, Math.floor((raw.duration ?? 0) / 60))
   return raw.players.map((p) => {
     const isRadiant = p.player_slot < 128
@@ -64,6 +116,9 @@ function toPlayers(raw: OpenDotaMatch): MatchPlayer[] {
     if (!xp_t?.length) {
       xp_t = expectedSeries(minutes, p.xp_per_min || 0)
     }
+    const slotItems = slotIds(p)
+      .map((id) => itemIndex.get(id))
+      .filter((k): k is string => !!k)
     return {
       account_id: p.account_id,
       personaname: p.personaname,
@@ -79,6 +134,7 @@ function toPlayers(raw: OpenDotaMatch): MatchPlayer[] {
       gold_t,
       xp_t,
       purchase_log: p.purchase_log,
+      slotItems,
       kills_log: p.kills_log,
       lane_role: p.lane_role,
       rank_tier: p.rank_tier,
@@ -99,12 +155,12 @@ async function fetchRetry(
 ): Promise<Response> {
   let last: unknown
   for (let i = 0; i < retries; i++) {
+    const signal = mergeSignal(init?.signal ?? undefined)
     if (init?.signal?.aborted) {
       throw new DOMException('Aborted', 'AbortError')
     }
     try {
-      const res = await fetch(url, init)
-      // OpenDota иногда отвечает 429/5xx — повторяем
+      const res = await fetch(url, { ...init, signal })
       if ((res.status === 429 || res.status >= 500) && i < retries - 1) {
         await sleep(600 * (i + 1), init?.signal ?? undefined)
         continue
@@ -113,6 +169,11 @@ async function fetchRetry(
     } catch (err) {
       last = err
       if (init?.signal?.aborted) throw err
+      const timedOut =
+        err instanceof DOMException && err.name === 'TimeoutError'
+      if (timedOut && i >= retries - 1) {
+        throw new Error('OpenDota не ответила вовремя. Попробуй ещё раз.')
+      }
       if (i >= retries - 1) throw err
       await sleep(500 * (i + 1), init?.signal ?? undefined)
     }
@@ -124,9 +185,11 @@ export async function requestParse(
   matchId: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  await fetchRetry(`${API}/request/${matchId}`, { method: 'POST', signal }, 2).catch(
-    () => undefined,
-  )
+  await fetchRetry(
+    `${API}/request/${matchId}`,
+    { method: 'POST', signal },
+    2,
+  ).catch(() => undefined)
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -147,7 +210,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** Можно разбирать без таймлайна — кривые синтезируем. */
 function bareIncomplete(m: OpenDotaMatch): boolean {
   return (
     !m.duration ||
@@ -161,6 +223,13 @@ function timelineMissing(m: OpenDotaMatch): boolean {
   return m.players.some((p) => !p.gold_t?.length)
 }
 
+export function isParseIncomplete(m: OpenDotaMatch): boolean {
+  const noFights = !(m.teamfights && m.teamfights.length > 0)
+  const noPurchases = m.players.every((p) => !(p.purchase_log && p.purchase_log.length))
+  const noCurves = timelineMissing(m)
+  return noFights || noPurchases || noCurves
+}
+
 export async function fetchMatch(
   matchId: number,
   signal?: AbortSignal,
@@ -168,34 +237,36 @@ export async function fetchMatch(
   match: OpenDotaMatch
   players: MatchPlayer[]
 }> {
-  await fetchHeroes(signal)
+  await Promise.all([fetchHeroes(signal), fetchItemIndex(signal)])
   const res = await fetchRetry(`${API}/matches/${matchId}`, { signal })
   if (res.status === 404) throw new Error('Матч не найден. Проверь Match ID.')
   if (!res.ok) throw new Error(`OpenDota ошибка: ${res.status}`)
   let data = (await res.json()) as OpenDotaMatch
 
-  // Ждём parse только если нет базовых данных. Без gold_t — синтезируем и идём дальше.
   if (bareIncomplete(data)) {
     await requestParse(matchId, signal)
-    for (let i = 0; i < 8; i++) {
-      await sleep(1500, signal)
+    for (let i = 0; i < 6; i++) {
+      await sleep(1200, signal)
       const again = await fetchRetry(`${API}/matches/${matchId}`, { signal })
       if (!again.ok) continue
       const next = (await again.json()) as OpenDotaMatch
       data = next
       if (!bareIncomplete(next)) break
     }
-  } else if (timelineMissing(data)) {
-    void requestParse(matchId) // в фоне, не блокируем UI
+  } else if (isParseIncomplete(data)) {
+    void requestParse(matchId)
   }
 
   if (bareIncomplete(data)) {
     throw new Error(
-      'Матч ещё без данных в OpenDota. Подожди пару минут или останови поиск и попробуй позже.',
+      'Матч ещё без данных в OpenDota. Подожди пару минут и нажми анализировать снова.',
     )
   }
 
-  return { match: data, players: toPlayers(data) }
+  return {
+    match: data,
+    players: toPlayers(data, itemsById ?? new Map()),
+  }
 }
 
 export function formatMatchError(err: unknown): string {
@@ -203,7 +274,14 @@ export function formatMatchError(err: unknown): string {
     return 'Поиск остановлен'
   }
   if (err instanceof Error) {
-    if (err.name === 'AbortError' || /aborted/i.test(err.message)) {
+    if (
+      err.name === 'AbortError' ||
+      err.name === 'TimeoutError' ||
+      /aborted|timeout/i.test(err.message)
+    ) {
+      if (/timeout/i.test(err.name + err.message)) {
+        return 'OpenDota не ответила вовремя. Попробуй ещё раз.'
+      }
       return 'Поиск остановлен'
     }
     if (/failed to fetch|networkerror|load failed|network request failed/i.test(err.message)) {
@@ -214,20 +292,18 @@ export function formatMatchError(err: unknown): string {
   return 'Неизвестная ошибка загрузки матча'
 }
 
-/** Быстрый снимок матча без ожидания parse — для иконок в истории. */
 export async function fetchMatchQuick(
   matchId: number,
   signal?: AbortSignal,
 ): Promise<{ match: OpenDotaMatch; players: MatchPlayer[] } | null> {
-  await fetchHeroes(signal)
+  await Promise.all([fetchHeroes(signal), fetchItemIndex(signal)])
   const res = await fetchRetry(`${API}/matches/${matchId}`, { signal }, 2)
   if (!res.ok) return null
   const data = (await res.json()) as OpenDotaMatch
   if (bareIncomplete(data)) return null
-  return { match: data, players: toPlayers(data) }
+  return { match: data, players: toPlayers(data, itemsById ?? new Map()) }
 }
 
-/** Карточка руинера для истории: один лёгкий запрос, без полного анализа. */
 export async function peekHistoryRuiner(
   matchId: number,
   signal?: AbortSignal,

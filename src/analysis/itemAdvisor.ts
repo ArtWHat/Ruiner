@@ -15,6 +15,7 @@ function enemyKeys(enemies: MatchPlayer[]): Set<string> {
     for (const p of e.purchase_log ?? []) {
       if (p.time >= 0) keys.add(p.key)
     }
+    for (const key of e.slotItems ?? []) keys.add(key)
   }
   return keys
 }

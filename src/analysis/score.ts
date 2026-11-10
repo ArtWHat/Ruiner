@@ -1,7 +1,7 @@
 import { adviseItemTargets } from './itemAdvisor'
 import { reviewBuild } from './buildReview'
 import { supportVisionNotes } from './supportVision'
-import { getHero, heroImageUrl } from '../api/opendota'
+import { getHero, heroImageUrl, isParseIncomplete } from '../api/opendota'
 import {
   ROLE_BASELINE,
   expectedSeries,
@@ -307,7 +307,7 @@ function analyzePlayer(
   const purchases = p.purchase_log ?? []
 
   const seen = new Set<string>()
-  const itemTimeline = purchases
+  let itemTimeline = purchases
     .filter(
       (x) =>
         x.time >= 0 &&
@@ -322,6 +322,19 @@ function analyzePlayer(
     }))
     .sort((a, b) => a.minute - b.minute)
     .slice(0, 14)
+
+  // OpenDota ещё без purchase_log — берём финальные слоты (время неизвестно).
+  if (!itemTimeline.length && p.slotItems?.length) {
+    const slotSeen = new Set<string>()
+    itemTimeline = p.slotItems
+      .filter((key) => isMajorItem(key) && !slotSeen.has(key) && (slotSeen.add(key), true))
+      .map((key) => ({
+        key,
+        minute: minutes,
+        label: itemLabel(key),
+      }))
+      .slice(0, 14)
+  }
 
   const itemFacts = targets
     .map((t) => {
@@ -464,6 +477,7 @@ export function analyzeMatch(
     lobbyType: match.lobby_type,
     matchType: matchTypeLabel(match.game_mode, match.lobby_type),
     turbo,
+    parseIncomplete: isParseIncomplete(match),
     players: analyzed,
     ruiner,
     mvp,

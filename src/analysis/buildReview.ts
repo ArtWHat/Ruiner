@@ -115,6 +115,7 @@ function enemyItemKeys(enemies: MatchPlayer[]): Set<string> {
     for (const p of e.purchase_log ?? []) {
       if (p.time >= 0) s.add(p.key)
     }
+    for (const key of e.slotItems ?? []) s.add(key)
   }
   return s
 }
@@ -152,6 +153,7 @@ export function reviewBuild(
   for (const p of self.purchase_log ?? []) {
     if (p.time >= 0) bought.add(p.key)
   }
+  for (const key of self.slotItems ?? []) bought.add(key)
 
   const items: BuildItemRow[] = itemTimeline.map((i) => {
     const ideal = IDEAL[i.key]

@@ -144,7 +144,13 @@ export function MomentsModal({ analysis, onClose }: Props) {
           опыту и смертям.
         </p>
         <div className="moments-list">
-          {fights.length === 0 && <p className="hint">Нет данных teamfights</p>}
+          {fights.length === 0 && (
+            <p className="hint">
+              {analysis.parseIncomplete
+                ? 'OpenDota ещё не распарсила драки этого матча (часто в Turbo). Подожди пару минут и нажми «Анализировать» снова.'
+                : 'В этом матче нет данных по командным дракам.'}
+            </p>
+          )}
           {fights.map((f) => {
             const show = (r: FightRow) => r.damage > 200 || r.died || r.kills > 0
             const rad = f.radiant.filter(show).sort((a, b) => b.damage - a.damage)

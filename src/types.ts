@@ -44,6 +44,8 @@ export interface MatchPlayer {
   gold_t?: number[]
   xp_t?: number[]
   purchase_log?: PurchaseEvent[]
+  /** Финальные предметы в слотах (когда purchase_log ещё нет). */
+  slotItems?: string[]
   kills_log?: KillLogEvent[]
   lane_role?: number
   rank_tier?: number
@@ -82,6 +84,16 @@ export interface OpenDotaMatch {
     rank_tier?: number
     hero_damage?: number
     tower_damage?: number
+    item_0?: number
+    item_1?: number
+    item_2?: number
+    item_3?: number
+    item_4?: number
+    item_5?: number
+    backpack_0?: number
+    backpack_1?: number
+    backpack_2?: number
+    item_neutral?: number
   }>
 }
 
@@ -140,6 +152,8 @@ export interface MatchAnalysis {
   lobbyType?: number
   matchType: string
   turbo: boolean
+  /** OpenDota ещё не отдал teamfights / purchase_log / кривые. */
+  parseIncomplete: boolean
   players: PlayerAnalysis[]
   ruiner: PlayerAnalysis
   mvp: PlayerAnalysis

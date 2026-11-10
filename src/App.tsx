@@ -368,6 +368,11 @@ export default function App() {
               Победа {analysis.radiantWin ? 'Света' : 'Тьмы'}
             </span>
             <span className="match-pill type">{analysis.matchType}</span>
+            {analysis.parseIncomplete && (
+              <span className="match-pill warn" title="Часть логов ещё не готова в OpenDota">
+                Неполный parse
+              </span>
+            )}
           </div>
           <div className="share-row">
             <button

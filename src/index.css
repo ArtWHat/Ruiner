@@ -321,6 +321,11 @@ input {
   border-color: rgba(140, 180, 255, 0.45);
 }
 
+.match-pill.warn {
+  border-color: rgba(220, 160, 70, 0.55);
+  color: #f0d090;
+}
+
 .share-row {
   display: flex;
   justify-content: center;
