@@ -154,6 +154,8 @@ export interface MatchAnalysis {
   turbo: boolean
   /** OpenDota ещё не отдал teamfights / purchase_log / кривые. */
   parseIncomplete: boolean
+  /** Откуда взяли матч: opendota | steam | cache | proxy. */
+  dataSource: 'opendota' | 'steam' | 'cache' | 'proxy'
   players: PlayerAnalysis[]
   ruiner: PlayerAnalysis
   mvp: PlayerAnalysis

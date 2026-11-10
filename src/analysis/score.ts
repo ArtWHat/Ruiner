@@ -456,6 +456,7 @@ function analyzePlayer(
 export function analyzeMatch(
   match: OpenDotaMatch,
   players: MatchPlayer[],
+  dataSource: MatchAnalysis['dataSource'] = 'opendota',
 ): MatchAnalysis {
   const turbo = isTurbo(match.game_mode)
   const analyzed = players.map((p) =>
@@ -478,6 +479,7 @@ export function analyzeMatch(
     matchType: matchTypeLabel(match.game_mode, match.lobby_type),
     turbo,
     parseIncomplete: isParseIncomplete(match),
+    dataSource,
     players: analyzed,
     ruiner,
     mvp,

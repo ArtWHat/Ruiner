@@ -1,9 +1,41 @@
 import { expectedSeries } from '../data/expectations'
 import type { HeroMeta, MatchPlayer, OpenDotaMatch } from '../types'
+import { readMatchCache, writeMatchCache } from './matchCache'
+import { steamDetailsUrl, steamToOpenDota } from './steamMatch'
 
 const API = 'https://api.opendota.com/api'
 const CDN = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes'
-const FETCH_MS = 25000
+const FETCH_MS = 12000
+
+export type MatchDataSource = 'opendota' | 'steam' | 'cache' | 'proxy'
+
+function matchProxyBase(): string {
+  const fromEnv = (import.meta as { env?: Record<string, string> }).env
+    ?.VITE_MATCH_PROXY
+  if (fromEnv?.trim()) return fromEnv.trim().replace(/\/$/, '')
+  try {
+    const local = localStorage.getItem('ruiner_match_proxy')?.trim()
+    if (local) return local.replace(/\/$/, '')
+  } catch {
+    // ignore
+  }
+  return ''
+}
+
+function steamApiKey(): string {
+  try {
+    return localStorage.getItem('ruiner_steam_key')?.trim() || ''
+  } catch {
+    return ''
+  }
+}
+
+/** CORS-прокси только как запасной канал к Steam (ключ не идеален, но лучше чем тишина). */
+const STEAM_CORS_PROXIES = [
+  (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  (url: string) =>
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+]
 
 let heroesCache: HeroMeta[] | null = null
 let heroesById: Map<number, HeroMeta> | null = null
@@ -288,24 +320,21 @@ export function isParseIncomplete(m: OpenDotaMatch): boolean {
   return noFights || noPurchases || noCurves
 }
 
-export async function fetchMatch(
+async function fetchMatchOpenDota(
   matchId: number,
   signal?: AbortSignal,
-): Promise<{
-  match: OpenDotaMatch
-  players: MatchPlayer[]
-}> {
-  await Promise.all([fetchHeroes(signal), fetchItemIndex(signal)])
-  const res = await fetchRetry(`${API}/matches/${matchId}`, { signal })
+): Promise<OpenDotaMatch> {
+  // Быстрее сдаёмся → чтобы успеть уйти на proxy/Steam/кэш
+  const res = await fetchRetry(`${API}/matches/${matchId}`, { signal }, 2)
   if (res.status === 404) throw new Error('Матч не найден. Проверь Match ID.')
   if (!res.ok) throw new Error(`OpenDota ошибка: ${res.status}`)
   let data = (await res.json()) as OpenDotaMatch
 
   if (bareIncomplete(data)) {
     await requestParse(matchId, signal)
-    for (let i = 0; i < 6; i++) {
-      await sleep(1200, signal)
-      const again = await fetchRetry(`${API}/matches/${matchId}`, { signal })
+    for (let i = 0; i < 4; i++) {
+      await sleep(900, signal)
+      const again = await fetchRetry(`${API}/matches/${matchId}`, { signal }, 2)
       if (!again.ok) continue
       const next = (await again.json()) as OpenDotaMatch
       data = next
@@ -320,11 +349,122 @@ export async function fetchMatch(
       'Матч ещё без данных в OpenDota. Подожди пару минут и нажми анализировать снова.',
     )
   }
+  return data
+}
 
-  return {
-    match: data,
-    players: toPlayers(data, itemsById ?? new Map()),
+async function fetchMatchProxy(
+  matchId: number,
+  signal?: AbortSignal,
+): Promise<{ match: OpenDotaMatch; source: MatchDataSource }> {
+  const base = matchProxyBase()
+  if (!base) throw new Error('proxy not configured')
+  const res = await fetchRetry(`${base}/match/${matchId}`, { signal }, 2)
+  if (!res.ok) throw new Error(`proxy ${res.status}`)
+  const data = (await res.json()) as OpenDotaMatch & {
+    _ruiner_source?: string
+    error?: string
   }
+  if (data.error || bareIncomplete(data)) {
+    throw new Error(data.error || 'proxy empty')
+  }
+  const src = data._ruiner_source === 'steam' ? 'steam' : 'proxy'
+  return { match: data, source: src }
+}
+
+async function fetchMatchSteam(
+  matchId: number,
+  signal?: AbortSignal,
+): Promise<OpenDotaMatch> {
+  const key = steamApiKey()
+  if (!key) throw new Error('steam key missing')
+  const target = steamDetailsUrl(matchId, key)
+  let last: unknown
+  for (const wrap of STEAM_CORS_PROXIES) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    try {
+      const res = await fetchRetry(wrap(target), { signal }, 2)
+      if (!res.ok) throw new Error(`steam proxy ${res.status}`)
+      const mapped = steamToOpenDota(await res.json(), matchId)
+      if (!mapped || bareIncomplete(mapped)) throw new Error('steam empty')
+      return mapped
+    } catch (err) {
+      last = err
+      if (isAbortError(err) || signal?.aborted) throw err
+    }
+  }
+  throw last instanceof Error ? last : new Error('Steam недоступен')
+}
+
+export async function fetchMatch(
+  matchId: number,
+  signal?: AbortSignal,
+): Promise<{
+  match: OpenDotaMatch
+  players: MatchPlayer[]
+  source: MatchDataSource
+}> {
+  await Promise.all([fetchHeroes(signal), fetchItemIndex(signal)])
+
+  const errors: string[] = []
+
+  try {
+    const data = await fetchMatchOpenDota(matchId, signal)
+    void writeMatchCache(matchId, data, 'opendota')
+    return {
+      match: data,
+      players: toPlayers(data, itemsById ?? new Map()),
+      source: 'opendota',
+    }
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) throw err
+    errors.push(err instanceof Error ? err.message : 'OpenDota')
+  }
+
+  // Сначала кэш — история открывается, даже если API лежит
+  const cached = await readMatchCache(matchId)
+  if (cached && !bareIncomplete(cached.match)) {
+    return {
+      match: cached.match,
+      players: toPlayers(cached.match, itemsById ?? new Map()),
+      source: 'cache',
+    }
+  }
+
+  try {
+    const proxied = await fetchMatchProxy(matchId, signal)
+    void writeMatchCache(matchId, proxied.match, proxied.source)
+    return {
+      match: proxied.match,
+      players: toPlayers(proxied.match, itemsById ?? new Map()),
+      source: proxied.source,
+    }
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) throw err
+    if (!(err instanceof Error && /proxy not configured/.test(err.message))) {
+      errors.push(err instanceof Error ? err.message : 'proxy')
+    }
+  }
+
+  try {
+    const data = await fetchMatchSteam(matchId, signal)
+    void writeMatchCache(matchId, data, 'steam')
+    return {
+      match: data,
+      players: toPlayers(data, itemsById ?? new Map()),
+      source: 'steam',
+    }
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) throw err
+    if (!(err instanceof Error && /steam key missing/.test(err.message))) {
+      errors.push(err instanceof Error ? err.message : 'Steam')
+    }
+  }
+
+  throw new Error(
+    errors.length
+      ? `Не удалось загрузить матч (${errors.slice(0, 2).join('; ')}). OpenDota сейчас нестабильна — попробуй позже.`
+      : 'Не удалось загрузить матч. Попробуй позже.',
+  )
 }
 
 export function formatMatchError(err: unknown): string {
@@ -341,7 +481,7 @@ export function formatMatchError(err: unknown): string {
   }
   if (reason instanceof Error) {
     if (/failed to fetch|networkerror|load failed|network request failed/i.test(reason.message)) {
-      return 'Нет ответа от OpenDota. Обнови страницу и попробуй ещё раз.'
+      return 'Нет ответа от источников матча. Обнови страницу и попробуй ещё раз.'
     }
     return reason.message
   }
@@ -360,22 +500,8 @@ export async function fetchMatchQuick(
   return { match: data, players: toPlayers(data, itemsById ?? new Map()) }
 }
 
-export async function peekHistoryRuiner(
-  matchId: number,
-  signal?: AbortSignal,
-): Promise<{
-  matchId: number
-  heroId: number
-  heroName: string
-  heroImage: string
-  displayName: string
-} | null> {
-  await fetchHeroes(signal)
-  const res = await fetchRetry(`${API}/matches/${matchId}`, { signal }, 2)
-  if (!res.ok) return null
-  const data = (await res.json()) as OpenDotaMatch
+function ruinerFromMatch(data: OpenDotaMatch, matchId: number) {
   if (!data.players?.some((p) => p.hero_id)) return null
-
   const players = data.players.map((p) => {
     const isRadiant = p.player_slot < 128
     const win = isRadiant ? data.radiant_win : !data.radiant_win
@@ -390,7 +516,6 @@ export async function peekHistoryRuiner(
     return (a.gold_per_min ?? 0) - (b.gold_per_min ?? 0)
   })[0]
   if (!ruiner) return null
-
   const hero = getHero(ruiner.hero_id)
   return {
     matchId,
@@ -398,5 +523,33 @@ export async function peekHistoryRuiner(
     heroName: hero?.localized_name ?? `Hero ${ruiner.hero_id}`,
     heroImage: heroImageUrl(hero),
     displayName: ruiner.personaname?.trim() || 'Anonymous',
+  }
+}
+
+export async function peekHistoryRuiner(
+  matchId: number,
+  signal?: AbortSignal,
+): Promise<{
+  matchId: number
+  heroId: number
+  heroName: string
+  heroImage: string
+  displayName: string
+} | null> {
+  await fetchHeroes(signal)
+
+  const cached = await readMatchCache(matchId)
+  if (cached) {
+    const fromCache = ruinerFromMatch(cached.match, matchId)
+    if (fromCache) return fromCache
+  }
+
+  try {
+    const res = await fetchRetry(`${API}/matches/${matchId}`, { signal }, 2)
+    if (!res.ok) return null
+    const data = (await res.json()) as OpenDotaMatch
+    return ruinerFromMatch(data, matchId)
+  } catch {
+    return null
   }
 }

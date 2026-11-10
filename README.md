@@ -6,6 +6,15 @@
 
 Он задеплоен на GitHub Pages. Закрытие Cursor / остановка `npm run dev` на него не влияет.
 
+### Откуда берутся матчи
+
+1. **OpenDota** (основной источник, как у who-ruined)
+2. **Запасной proxy** (Cloudflare Worker в `worker/`) — OpenDota → Steam
+3. **Steam Web API** (если в `localStorage.ruiner_steam_key` лежит ключ с https://steamcommunity.com/dev/apikey)
+4. **Кэш в браузере** — уже открытые матчи открываются даже когда API лежит
+
+Proxy URL: `VITE_MATCH_PROXY` или `localStorage.ruiner_match_proxy` (без `/` на конце).
+
 Локальная разработка (гаснет вместе с терминалом Cursor):
 
 ```bash

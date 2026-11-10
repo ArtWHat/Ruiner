@@ -250,9 +250,9 @@ export default function App() {
     url.searchParams.set('m', String(id))
     window.history.replaceState({}, '', `${url.pathname}?m=${id}`)
     try {
-      const { match, players } = await fetchMatch(id, ac.signal)
+      const { match, players, source } = await fetchMatch(id, ac.signal)
       if (ac.signal.aborted || abortRef.current !== ac) return
-      const result = analyzeMatch(match, players)
+      const result = analyzeMatch(match, players, source)
       setAnalysis(result)
       setSelected(result.ruiner)
       setTab('gold')
@@ -387,6 +387,27 @@ export default function App() {
             {analysis.parseIncomplete && (
               <span className="match-pill warn" title="Часть логов ещё не готова в OpenDota">
                 Неполный parse
+              </span>
+            )}
+            {analysis.dataSource === 'cache' && (
+              <span
+                className="match-pill warn"
+                title="OpenDota не ответила — показан сохранённый разбор"
+              >
+                Из кэша
+              </span>
+            )}
+            {analysis.dataSource === 'steam' && (
+              <span
+                className="match-pill warn"
+                title="Данные со Steam API (без драк и таймингов покупок)"
+              >
+                Steam
+              </span>
+            )}
+            {analysis.dataSource === 'proxy' && (
+              <span className="match-pill" title="Загружено через запасной прокси">
+                Proxy
               </span>
             )}
           </div>
