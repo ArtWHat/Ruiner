@@ -6,14 +6,24 @@ const CDN = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react
 
 let heroesCache: HeroMeta[] | null = null
 let heroesById: Map<number, HeroMeta> | null = null
+let heroesInflight: Promise<HeroMeta[]> | null = null
 
 export async function fetchHeroes(signal?: AbortSignal): Promise<HeroMeta[]> {
   if (heroesCache) return heroesCache
-  const res = await fetch(`${API}/heroes`, { signal })
-  if (!res.ok) throw new Error('Не удалось загрузить список героев')
-  heroesCache = (await res.json()) as HeroMeta[]
-  heroesById = new Map(heroesCache.map((h) => [h.id, h]))
-  return heroesCache
+  if (!heroesInflight) {
+    heroesInflight = (async () => {
+      const res = await fetchRetry(`${API}/heroes`)
+      if (!res.ok) throw new Error('Не удалось загрузить список героев')
+      heroesCache = (await res.json()) as HeroMeta[]
+      heroesById = new Map(heroesCache.map((h) => [h.id, h]))
+      return heroesCache
+    })().finally(() => {
+      heroesInflight = null
+    })
+  }
+  const list = await heroesInflight
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  return list
 }
 
 export function getHero(id: number): HeroMeta | undefined {
@@ -36,7 +46,6 @@ function synthesizeSeries(
   const out: number[] = []
   for (let m = 0; m <= minutes; m++) {
     const t = m / minutes
-    // чуть медленнее старт, как у реальной NW-кривой
     const eased = t * (0.75 + 0.25 * t)
     out.push(Math.round(end * eased))
   }
@@ -83,11 +92,39 @@ function toPlayers(raw: OpenDotaMatch): MatchPlayer[] {
 
 export { itemIconUrl } from '../data/items'
 
+async function fetchRetry(
+  url: string,
+  init?: RequestInit,
+  retries = 3,
+): Promise<Response> {
+  let last: unknown
+  for (let i = 0; i < retries; i++) {
+    if (init?.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError')
+    }
+    try {
+      const res = await fetch(url, init)
+      // OpenDota иногда отвечает 429/5xx — повторяем
+      if ((res.status === 429 || res.status >= 500) && i < retries - 1) {
+        await sleep(600 * (i + 1), init?.signal)
+        continue
+      }
+      return res
+    } catch (err) {
+      last = err
+      if (init?.signal?.aborted) throw err
+      if (i >= retries - 1) throw err
+      await sleep(500 * (i + 1), init?.signal)
+    }
+  }
+  throw last instanceof Error ? last : new Error('Failed to fetch')
+}
+
 export async function requestParse(
   matchId: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  await fetch(`${API}/request/${matchId}`, { method: 'POST', signal }).catch(
+  await fetchRetry(`${API}/request/${matchId}`, { method: 'POST', signal }, 2).catch(
     () => undefined,
   )
 }
@@ -132,24 +169,24 @@ export async function fetchMatch(
   players: MatchPlayer[]
 }> {
   await fetchHeroes(signal)
-  const res = await fetch(`${API}/matches/${matchId}`, { signal })
+  const res = await fetchRetry(`${API}/matches/${matchId}`, { signal })
   if (res.status === 404) throw new Error('Матч не найден. Проверь Match ID.')
   if (!res.ok) throw new Error(`OpenDota ошибка: ${res.status}`)
   let data = (await res.json()) as OpenDotaMatch
 
-  // Турбо / SD / обычные: просим parse, если нет героев или таймлайна
-  if (bareIncomplete(data) || timelineMissing(data)) {
+  // Ждём parse только если нет базовых данных. Без gold_t — синтезируем и идём дальше.
+  if (bareIncomplete(data)) {
     await requestParse(matchId, signal)
-    const tries = bareIncomplete(data) ? 12 : 6
-    for (let i = 0; i < tries; i++) {
-      await sleep(2000, signal)
-      const again = await fetch(`${API}/matches/${matchId}`, { signal })
+    for (let i = 0; i < 8; i++) {
+      await sleep(1500, signal)
+      const again = await fetchRetry(`${API}/matches/${matchId}`, { signal })
       if (!again.ok) continue
       const next = (await again.json()) as OpenDotaMatch
       data = next
-      if (!bareIncomplete(next) && !timelineMissing(next)) break
-      if (!bareIncomplete(next) && i >= 3) break // есть база — хватит, таймлайн синтезируем
+      if (!bareIncomplete(next)) break
     }
+  } else if (timelineMissing(data)) {
+    void requestParse(matchId) // в фоне, не блокируем UI
   }
 
   if (bareIncomplete(data)) {
@@ -165,7 +202,15 @@ export function formatMatchError(err: unknown): string {
   if (err instanceof DOMException && err.name === 'AbortError') {
     return 'Поиск остановлен'
   }
-  if (err instanceof Error) return err.message
+  if (err instanceof Error) {
+    if (err.name === 'AbortError' || /aborted/i.test(err.message)) {
+      return 'Поиск остановлен'
+    }
+    if (/failed to fetch|networkerror|load failed|network request failed/i.test(err.message)) {
+      return 'Нет ответа от OpenDota. Обнови страницу и попробуй ещё раз.'
+    }
+    return err.message
+  }
   return 'Неизвестная ошибка загрузки матча'
 }
 
@@ -175,7 +220,7 @@ export async function fetchMatchQuick(
   signal?: AbortSignal,
 ): Promise<{ match: OpenDotaMatch; players: MatchPlayer[] } | null> {
   await fetchHeroes(signal)
-  const res = await fetch(`${API}/matches/${matchId}`, { signal })
+  const res = await fetchRetry(`${API}/matches/${matchId}`, { signal }, 2)
   if (!res.ok) return null
   const data = (await res.json()) as OpenDotaMatch
   if (bareIncomplete(data)) return null
@@ -194,7 +239,7 @@ export async function peekHistoryRuiner(
   displayName: string
 } | null> {
   await fetchHeroes(signal)
-  const res = await fetch(`${API}/matches/${matchId}`, { signal })
+  const res = await fetchRetry(`${API}/matches/${matchId}`, { signal }, 2)
   if (!res.ok) return null
   const data = (await res.json()) as OpenDotaMatch
   if (!data.players?.some((p) => p.hero_id)) return null

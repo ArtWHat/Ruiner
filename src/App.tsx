@@ -109,17 +109,19 @@ export default function App() {
   const bootedRef = useRef(false)
 
   useEffect(() => {
-    const ac = new AbortController()
     const base = loadHistory()
     setHistory(base)
 
     ;(async () => {
+      // Сначала даём приоритет анализу матча из ?m=, историю — после паузы
+      if (parseMatchQuery()) {
+        await new Promise((r) => window.setTimeout(r, 2500))
+      }
       try {
-        await fetchHeroes(ac.signal)
+        await fetchHeroes()
       } catch {
         return
       }
-      if (ac.signal.aborted) return
 
       let current = base.map(fillFromHeroId)
       if (current.some((e, i) => e.heroImage !== base[i]?.heroImage)) {
@@ -128,11 +130,10 @@ export default function App() {
       }
 
       for (let i = 0; i < current.length; i++) {
-        if (ac.signal.aborted) return
         if (!needsHistoryArt(current[i])) continue
         try {
-          const peeked = await peekHistoryRuiner(current[i].matchId, ac.signal)
-          if (!peeked || ac.signal.aborted) continue
+          const peeked = await peekHistoryRuiner(current[i].matchId)
+          if (!peeked) continue
           current = current.map((e, idx) =>
             idx === i
               ? {
@@ -146,14 +147,12 @@ export default function App() {
           )
           setHistory([...current])
           saveHistory(current)
+          await new Promise((r) => window.setTimeout(r, 350))
         } catch {
           // следующий матч
         }
       }
     })()
-
-    // не abort на unmount: Strict Mode иначе рвёт подгрузку иконок
-    return () => undefined
   }, [])
 
   // Автозапуск по ?m=… (без abort на unmount — иначе Strict Mode рвёт запрос)
